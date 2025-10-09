@@ -1,0 +1,26 @@
+{
+    "name": "convoso-automation",
+    "version": "1.0.0",
+    "description": "Automated Convoso agent dialer with call handling",
+    "main": "src/index.js",
+    "scripts": {
+        "start": "node src/index.js",
+        "dev": "node --trace-warnings src/index.js",
+        "test": "node test-api.js",
+        "test:full": "node test-api.js full"
+    },
+    "keywords": [
+        "convoso",
+        "automation",
+        "dialer"
+    ],
+    "author": "Bridge Legal",
+    "license": "MIT",
+    "dependencies": {
+        "axios": "^1.6.0",
+        "dotenv": "^16.3.1",
+        "puppeteer": "^24.23.0",
+        "uuid": "^9.0.1",
+        "winston": "^3.11.0"
+    }
+}
