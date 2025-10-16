@@ -18,7 +18,7 @@ class PuppeteerAgent {
     this.startTime = null;
     this.inCall = false;
     this.lastLeadId = null;
-    this.lastCallLogId = null;
+    this.lastCallLogId = null; // Track call_log_id to prevent duplicate operations
   }
 
   /**
@@ -56,8 +56,7 @@ class PuppeteerAgent {
             text.includes('setAvailability') ||
             text.includes('phone state') ||
             text.includes('FINISHED LEAD DISPOSITION') ||
-            text.includes('hangup') ||
-            text.includes('NEW CALL DETECTED')) {
+            text.includes('hangup')) {
           logger.info(`🌐 Browser: ${text}`);
         }
       });
@@ -98,10 +97,7 @@ class PuppeteerAgent {
       // Select campaign and set availability
       await this.selectCampaignAndSetAvailable();
 
-      // Setup call event listener
-      await this.setupCallEventListener();
-
-      // Start monitoring loop (just to keep process alive)
+      // Start monitoring for calls
       await this.monitorCalls();
 
     } catch (error) {
@@ -118,8 +114,10 @@ class PuppeteerAgent {
     try {
       logger.info('📞 Selecting campaign and logging in...');
 
+      // Wait for modal or form to appear
       await Helpers.sleep(2000);
 
+      // Step 1: Select campaign from dropdown
       logger.info(`🎯 Selecting campaign: ${config.campaignName}`);
       
       const campaignSelected = await this.page.evaluate((campaignName) => {
@@ -143,6 +141,7 @@ class PuppeteerAgent {
       logger.info('✅ Campaign selected');
       await Helpers.sleep(1000);
 
+      // Step 2: Click the login button to enter the campaign
       logger.info('🔘 Clicking login button...');
       
       await this.page.evaluate(() => {
@@ -157,9 +156,12 @@ class PuppeteerAgent {
       });
 
       logger.info('✅ Campaign login button clicked');
+      
+      // Wait for the phone system to initialize
       logger.info('⏳ Waiting for phone system to initialize...');
       await Helpers.sleep(5000);
 
+      // Step 3: Change availability from "Not Ready - Break" to "Available"
       logger.info('🟢 Changing availability to Available...');
       
       const availabilityChanged = await this.page.evaluate((readyCode) => {
@@ -252,6 +254,17 @@ class PuppeteerAgent {
 
       await Helpers.sleep(3000);
 
+      const currentStatus = await this.page.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const statusBtn = buttons.find(b => 
+          b.textContent.includes('Available') || 
+          b.textContent.includes('Not Ready')
+        );
+        return statusBtn ? statusBtn.textContent.trim() : 'Unknown';
+      });
+
+      logger.info(`📊 Current availability: ${currentStatus}`);
+
       logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
       logger.info('✅ Agent is now ready and listening for calls...');
       logger.info(`⚙️  Call duration: ${config.callDuration / 1000}s`);
@@ -265,140 +278,69 @@ class PuppeteerAgent {
   }
 
   /**
-   * Setup event listener to detect calls immediately
-   */
-  async setupCallEventListener() {
-    logger.info('🔧 Setting up call event listener...');
-    
-    await this.page.evaluateOnNewDocument(() => {
-      // Intercept Angular $broadcast for 'call.incoming' event
-      if (window.angular) {
-        const originalBroadcast = window.angular.element(document.body).scope().$root.$broadcast;
-        
-        window.angular.element(document.body).scope().$root.$broadcast = function(...args) {
-          const eventName = args[0];
-          
-          if (eventName === 'call.incoming') {
-            console.log('NEW CALL DETECTED via $broadcast');
-            window.callJustCameIn = true;
-            window.callComeInTime = Date.now();
-          }
-          
-          return originalBroadcast.apply(this, args);
-        };
-      }
-    });
-
-    // Also inject a watcher
-    await this.page.evaluate(() => {
-      window.callJustCameIn = false;
-      window.callComeInTime = null;
-      
-      // Watch for lead_id changes
-      setInterval(() => {
-        if (window.lead_id && window.lead_id > 0 && !window.callJustCameIn) {
-          console.log('NEW CALL DETECTED via lead_id poll:', window.lead_id);
-          window.callJustCameIn = true;
-          window.callComeInTime = Date.now();
-        }
-      }, 500);
-    });
-    
-    logger.info('✅ Call event listener setup complete');
-  }
-
-  /**
-   * Check for and handle "Lead Hung Up" modal
-   */
-  async checkAndHandleHangupModal() {
-    const modalHandled = await this.page.evaluate(() => {
-      const allText = document.body.innerText;
-      
-      if (allText.includes('Lead Hung Up') || 
-          allText.includes('lead hung up') ||
-          allText.includes('Would you like to reconnect')) {
-        
-        console.log('Detected "Lead Hung Up" modal');
-        
-        const buttons = Array.from(document.querySelectorAll('button'));
-        const wrapupBtn = buttons.find(b => {
-          const text = b.textContent.trim();
-          return (text === 'Wrapup' || text === 'WRAPUP' || text === 'WrapUp') &&
-                b.offsetParent !== null;
-        });
-        
-        if (wrapupBtn) {
-          console.log('Clicking Wrapup button in modal...');
-          wrapupBtn.click();
-          return true;
-        }
-        
-        console.log('Wrapup button not found in modal');
-        return false;
-      }
-      
-      return false;
-    });
-    
-    return modalHandled;
-  }
-
-  /**
-   * Monitor for calls using event detection
+   * Monitor for calls using page evaluation
    */
   async monitorCalls() {
     while (this.isRunning) {
       try {
-        // Check if max calls reached
         if (config.maxCalls > 0 && this.callCount >= config.maxCalls) {
           logger.info(`🎯 Maximum calls (${config.maxCalls}) reached. Stopping...`);
           await this.stop();
           break;
         }
 
-        // Skip if already in a call
         if (this.inCall) {
-          await Helpers.sleep(500);
+          await Helpers.sleep(1000);
           continue;
         }
 
-        // Check if a new call just came in
-        const callStatus = await this.page.evaluate(() => {
-          if (window.callJustCameIn && window.lead_id && window.lead_id > 0) {
-            // Reset flag
-            window.callJustCameIn = false;
-            
-            // Get call info
-            let callInfo = { lead_id: window.lead_id };
-            
+        // Check phone state
+        const phoneState = await this.page.evaluate(() => {
+          try {
             if (window.angular) {
               const scope = angular.element(document.body).scope();
-              if (scope && scope.leadInfo) {
-                callInfo = scope.leadInfo;
-              }
+              return scope.phoneState || scope.$root.phoneState || 0;
             }
-            
-            if (window.leadInfo) {
-              callInfo = window.leadInfo;
-            }
-            
-            return {
-              hasCall: true,
-              callInfo: callInfo,
-              callComeInTime: window.callComeInTime
-            };
+            return 0;
+          } catch (e) {
+            return 0;
           }
-          
-          return { hasCall: false };
         });
 
-        if (callStatus.hasCall) {
+        // Only accept calls when in Available state (2)
+        if (phoneState !== 2) {
+          await Helpers.sleep(2000);
+          continue;
+        }
+
+        // Check for active call
+        const callInfo = await this.page.evaluate(() => {
+          try {
+            if (window.lead_id && window.lead_id > 0) {
+              if (window.angular) {
+                const scope = angular.element(document.body).scope();
+                if (scope && scope.leadInfo) {
+                  return scope.leadInfo;
+                }
+              }
+              
+              if (window.leadInfo) {
+                return window.leadInfo;
+              }
+              
+              return { lead_id: window.lead_id };
+            }
+            return null;
+          } catch (e) {
+            return null;
+          }
+        });
+
+        if (callInfo && callInfo.lead_id) {
           // Check if this is a truly new call
-          const callInfo = callStatus.callInfo;
-          
           if (this.lastLeadId === callInfo.lead_id && 
               this.lastCallLogId === callInfo.call_log_id) {
-            await Helpers.sleep(500);
+            await Helpers.sleep(1000);
             continue;
           }
           
@@ -406,17 +348,14 @@ class PuppeteerAgent {
           this.inCall = true;
           this.lastLeadId = callInfo.lead_id;
           this.lastCallLogId = callInfo.call_log_id;
-          
-          await this.handleCall(callInfo, callStatus.callComeInTime);
-          
+          await this.handleCall(callInfo);
           this.inCall = false;
         } else {
-          await Helpers.sleep(500);
+          await Helpers.sleep(2000);
         }
 
       } catch (error) {
         logger.error('❌ Error in monitor loop:', Helpers.getErrorMessage(error));
-        logger.error('Error details:', error);
         this.inCall = false;
         await Helpers.sleep(5000);
       }
@@ -424,13 +363,10 @@ class PuppeteerAgent {
   }
 
   /**
-   * Handle detected call
+   * Handle detected call - LET ANGULAR DO THE WORK
    */
-  async handleCall(callInfo, callStartTime) {
-    if (!callStartTime) {
-      callStartTime = Date.now();
-    }
-    
+  async handleCall(callInfo) {
+    const callStartTime = Date.now();
     this.callCount++;
 
     try {
@@ -444,59 +380,46 @@ class PuppeteerAgent {
       }
 
       // Wait configured duration
-      logger.info(`⏳ Waiting for ${config.callDuration / 1000}s...`);
+      logger.info(`⏳ In call for ${config.callDuration / 1000}s...`);
       await Helpers.sleep(config.callDuration);
 
-      // Handle call end
-      logger.info('📴 Initiating call end...');
-      await Helpers.sleep(2000);
-
-      logger.info('🔍 Checking for "Lead Hung Up" modal...');
-      let modalHandled = await this.checkAndHandleHangupModal();
-
-      if (modalHandled) {
-        logger.info('✅ "Lead Hung Up" modal handled');
-      } else {
-        logger.info('📴 No modal detected, looking for WRAPUP button...');
-        
-        const wrapupClicked = await this.page.evaluate(() => {
-          const buttons = Array.from(document.querySelectorAll('button'));
-          const wrapupBtn = buttons.find(b => {
-            const text = b.textContent.trim();
-            return (text === 'WRAPUP' || text === 'Wrapup') && 
-                  !b.disabled && 
-                  b.offsetParent !== null;
-          });
-          
-          if (wrapupBtn) {
-            console.log('Clicking WRAPUP button once...');
-            wrapupBtn.click();
-            return true;
-          }
-          return false;
+      // CRITICAL: Click WRAPUP only ONCE and let Angular handle everything
+      logger.info('📴 Initiating call end (clicking WRAPUP once)...');
+      
+      const wrapupClicked = await this.page.evaluate(() => {
+        const buttons = Array.from(document.querySelectorAll('button'));
+        const wrapupBtn = buttons.find(b => {
+          const text = b.textContent.trim();
+          return (text === 'WRAPUP' || text === 'Wrapup') && 
+                 !b.disabled && 
+                 b.offsetParent !== null;
         });
-
-        if (!wrapupClicked) {
-          logger.warn('⚠️ WRAPUP button not found, may already be in wrapup state');
-        } else {
-          logger.info('✅ WRAPUP clicked');
+        
+        if (wrapupBtn) {
+          console.log('Clicking WRAPUP button once...');
+          wrapupBtn.click();
+          return true;
         }
+        return false;
+      });
+
+      if (!wrapupClicked) {
+        logger.warn('⚠️ WRAPUP button not found, may already be in wrapup state');
+      } else {
+        logger.info('✅ WRAPUP clicked');
       }
 
+      // CRITICAL: Wait for Angular to complete hangup and show disposition panel
       logger.info('⏳ Waiting for disposition panel to appear...');
-      await Helpers.sleep(3000);
+      await Helpers.sleep(4000); // Give Angular time to process hangup and render panel
 
-      const lateModalHandled = await this.checkAndHandleHangupModal();
-      if (lateModalHandled) {
-        logger.info('✅ Late modal handled, waiting for disposition panel...');
-        await Helpers.sleep(2000);
-      }
-
+      // CRITICAL: Set disposition ONLY ONCE
       logger.info('📝 Setting disposition...');
       
       const dispositionSet = await this.page.evaluate((dispositionStatus) => {
         const buttons = Array.from(document.querySelectorAll('button'));
         
+        // Log what's visible for debugging
         const visibleButtons = buttons
           .filter(b => b.offsetParent !== null && b.textContent.trim().length > 0)
           .map(b => b.textContent.trim());
@@ -524,6 +447,7 @@ class PuppeteerAgent {
       if (!dispositionSet) {
         logger.warn('⚠️ Disposition button not found, trying to open panel...');
         
+        // Try to open disposition panel
         const panelOpened = await this.page.evaluate(() => {
           const buttons = Array.from(document.querySelectorAll('button'));
           const dispoBtn = buttons.find(b => 
@@ -543,6 +467,7 @@ class PuppeteerAgent {
           logger.info('✅ Disposition panel opened, waiting...');
           await Helpers.sleep(2000);
           
+          // Try again
           const retryDispo = await this.page.evaluate((dispositionStatus) => {
             const buttons = Array.from(document.querySelectorAll('button'));
             const dispoBtn = buttons.find(b => {
@@ -573,6 +498,7 @@ class PuppeteerAgent {
         logger.info('✅ Disposition set successfully');
       }
 
+      // CRITICAL: Wait for Angular to process disposition and return to Available state
       logger.info('⏳ Waiting for system to return to Available state...');
       
       const availableStateReached = await this.waitForPhoneState(2, 10000);
@@ -587,9 +513,11 @@ class PuppeteerAgent {
       logger.info(`✅ Call #${this.callCount} completed in ${Helpers.formatDuration(Math.floor(totalDuration / 1000))}`);
       logger.info('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
 
+      // Reset tracking
       this.lastLeadId = null;
       this.lastCallLogId = null;
 
+      // Minimum wait between calls
       logger.info('⏳ Waiting 3s before next call...');
       await Helpers.sleep(3000);
 
@@ -602,6 +530,9 @@ class PuppeteerAgent {
     }
   }
 
+  /**
+   * Wait for specific phone state
+   */
   async waitForPhoneState(expectedState, timeoutMs) {
     const startTime = Date.now();
     
@@ -628,6 +559,9 @@ class PuppeteerAgent {
     return false;
   }
 
+  /**
+   * Set disposition via API (fallback)
+   */
   async setDispositionViaAPI(callInfo) {
     try {
       const cookies = await this.page.cookies();
@@ -668,6 +602,9 @@ class PuppeteerAgent {
     }
   }
 
+  /**
+   * Stop the agent
+   */
   async stop() {
     if (!this.isRunning) {
       return;

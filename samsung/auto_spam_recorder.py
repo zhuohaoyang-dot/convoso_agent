@@ -159,7 +159,7 @@ class AutoSpamRecorder:
                 else:
                     consecutive_no_call += 1
                     
-                    # 连续 3 次没检测到通话，重置状态
+                    # 如果三次没有检测到通话，重置状态
                     if consecutive_no_call >= 3:
                         if self.call_detected:
                             print("[Status] Call ended\n")
